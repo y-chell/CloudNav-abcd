@@ -990,6 +990,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 <Key size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                                 <input 
                                     type="password" 
+                                    name="cloudnav-ai-api-key"
+                                    autoComplete="new-password"
+                                    readOnly
+                                    onFocus={(e) => { e.currentTarget.readOnly = false; }}
                                     value={localConfig.apiKey}
                                     onChange={(e) => handleChange('apiKey', e.target.value)}
                                     placeholder="sk-..."
