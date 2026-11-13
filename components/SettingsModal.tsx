@@ -74,6 +74,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const [generatedIcons, setGeneratedIcons] = useState<string[]>([]);
   
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isTestingAI, setIsTestingAI] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const shouldStopRef = useRef(false);
 
@@ -164,13 +165,27 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     onClose();
   };
 
+  const missingDescription = (description?: string) =>
+      !description?.trim()
+      || description === '生成描述失败'
+      || description === '无法生成描述'
+      || description === '请在设置中配置 API Key';
+
   const handleBulkGenerate = async () => {
-    if (!localConfig.apiKey) {
+    if (!localConfig.apiKey?.trim()) {
         alert("请先配置并保存 API Key");
         return;
     }
+    if (localConfig.provider === 'openai' && !localConfig.baseUrl?.trim()) {
+        alert("请先填写 Base URL，例如 https://api.openai.com/v1");
+        return;
+    }
+    if (!localConfig.model?.trim()) {
+        alert("请先填写模型名称");
+        return;
+    }
 
-    const missingLinks = links.filter(l => !l.description);
+    const missingLinks = links.filter(l => missingDescription(l.description));
     if (missingLinks.length === 0) {
         alert("所有链接都已有描述！");
         return;
@@ -181,8 +196,10 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsProcessing(true);
     shouldStopRef.current = false;
     setProgress({ current: 0, total: missingLinks.length });
-    
+
     let currentLinks = [...links];
+    let successCount = 0;
+    const errors: string[] = [];
 
     for (let i = 0; i < missingLinks.length; i++) {
         if (shouldStopRef.current) break;
@@ -192,13 +209,48 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             const desc = await generateLinkDescription(link.title, link.url, localConfig);
             currentLinks = currentLinks.map(l => l.id === link.id ? { ...l, description: desc } : l);
             onUpdateLinks(currentLinks);
-            setProgress({ current: i + 1, total: missingLinks.length });
+            successCount++;
         } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
             console.error(`Failed to generate for ${link.title}`, e);
+            errors.push(`${link.title}: ${message}`);
+        } finally {
+            setProgress({ current: i + 1, total: missingLinks.length });
         }
     }
 
     setIsProcessing(false);
+
+    if (errors.length > 0) {
+        alert(`补全结束：成功 ${successCount} 个，失败 ${errors.length} 个。\n\n失败原因（前 3 条）：\n${errors.slice(0, 3).join('\n')}`);
+    } else {
+        alert(`补全完成：成功生成 ${successCount} 条描述。`);
+    }
+  };
+
+  const handleTestAI = async () => {
+    if (!localConfig.apiKey?.trim()) {
+        alert("请先填写 API Key");
+        return;
+    }
+    if (localConfig.provider === 'openai' && !localConfig.baseUrl?.trim()) {
+        alert("请先填写 Base URL，例如 https://api.openai.com/v1");
+        return;
+    }
+    if (!localConfig.model?.trim()) {
+        alert("请先填写模型名称");
+        return;
+    }
+
+    setIsTestingAI(true);
+    try {
+        const desc = await generateLinkDescription('OpenAI', 'https://openai.com', localConfig);
+        alert(`连接成功，模型返回：${desc}`);
+    } catch (e) {
+        alert(`连接失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+        setIsTestingAI(false);
+    }
   };
 
   const handleCopy = (text: string, key: string) => {
@@ -957,6 +1009,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                                     placeholder="https://api.openai.com/v1"
                                     className="w-full p-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white outline-none focus:ring-2 focus:ring-blue-500"
                                 />
+                                <p className="text-xs text-slate-500 mt-1">
+                                    填 API 根地址即可：OpenAI 官方填 https://api.openai.com/v1，兼容网关填它提供的 /v1 地址。只填域名会自动补 /v1/chat/completions。
+                                </p>
                             </div>
                         )}
 
@@ -966,14 +1021,34 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 type="text" 
                                 value={localConfig.model}
                                 onChange={(e) => handleChange('model', e.target.value)}
-                                placeholder={localConfig.provider === 'gemini' ? "gemini-2.5-flash" : "gpt-3.5-turbo"}
+                                placeholder={localConfig.provider === 'gemini' ? "gemini-3.5-flash" : "例如 gpt-5.6-sol、deepseek-chat"}
                                 className="w-full p-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white outline-none focus:ring-2 focus:ring-blue-500"
                             />
+                            <p className="text-xs text-slate-500 mt-1">
+                                推理模型（gpt-5、o1/o3/o4 等）不支持自定义 temperature，本工具已不再发送该参数。
+                            </p>
                         </div>
 
                         <div className="pt-4 border-t border-slate-100 dark:border-slate-700">
                             <h4 className="text-sm font-semibold mb-2 dark:text-slate-200">批量操作</h4>
-                            {isProcessing ? (
+                            <div className="flex flex-wrap gap-2 mb-3">
+                                <button
+                                    onClick={handleTestAI}
+                                    disabled={isTestingAI || isProcessing}
+                                    className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-3 py-2 rounded-lg transition-colors border border-blue-200 dark:border-blue-800 disabled:opacity-60"
+                                >
+                                    <Zap size={16} /> {isTestingAI ? '测试中...' : '测试连接'}
+                                </button>
+                                {!isProcessing && (
+                                    <button
+                                        onClick={handleBulkGenerate}
+                                        className="flex items-center gap-2 text-sm text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 px-3 py-2 rounded-lg transition-colors border border-purple-200 dark:border-purple-800"
+                                    >
+                                        <Sparkles size={16} /> 一键补全所有缺失的描述
+                                    </button>
+                                )}
+                            </div>
+                            {isProcessing && (
                                 <div className="space-y-2">
                                     <div className="flex justify-between text-xs text-slate-600 dark:text-slate-400">
                                         <span>正在生成描述... ({progress.current}/{progress.total})</span>
@@ -982,16 +1057,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                                         </button>
                                     </div>
                                     <div className="w-full h-2 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                                        <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${(progress.current / progress.total) * 100}%` }}></div>
+                                        <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%` }}></div>
                                     </div>
                                 </div>
-                            ) : (
-                                <button 
-                                    onClick={handleBulkGenerate}
-                                    className="flex items-center gap-2 text-sm text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 px-3 py-2 rounded-lg transition-colors border border-purple-200 dark:border-purple-800"
-                                >
-                                    <Sparkles size={16} /> 一键补全所有缺失的描述
-                                </button>
                             )}
                         </div>
                     </div>

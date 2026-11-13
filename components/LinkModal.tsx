@@ -169,22 +169,26 @@ const LinkModal: React.FC<LinkModalProps> = ({ isOpen, onClose, onSave, onDelete
     }
 
     setIsGenerating(true);
-    
-    // Parallel execution for speed
-    try {
-        const descPromise = generateLinkDescription(title, url, aiConfig);
-        const catPromise = suggestCategory(title, url, categories, aiConfig);
-        
-        const [desc, cat] = await Promise.all([descPromise, catPromise]);
-        
-        if (desc) setDescription(desc);
-        if (cat) setCategoryId(cat);
-        
-    } catch (e) {
-        console.error("AI Assist failed", e);
-    } finally {
-        setIsGenerating(false);
+
+    // 并行请求：描述失败不影响分类推荐，反之亦然。
+    const [descResult, catResult] = await Promise.allSettled([
+        generateLinkDescription(title, url, aiConfig),
+        suggestCategory(title, url, categories, aiConfig),
+    ]);
+
+    if (descResult.status === 'fulfilled') {
+        setDescription(descResult.value);
+    } else {
+        const message = descResult.reason instanceof Error ? descResult.reason.message : String(descResult.reason);
+        console.error("AI description generation failed", descResult.reason);
+        alert(`AI 生成描述失败：${message}`);
     }
+
+    if (catResult.status === 'fulfilled' && catResult.value) {
+        setCategoryId(catResult.value);
+    }
+
+    setIsGenerating(false);
   };
 
   const handleFetchIcon = async () => {
