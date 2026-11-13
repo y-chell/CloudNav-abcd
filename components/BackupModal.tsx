@@ -141,7 +141,9 @@ const BackupModal: React.FC<BackupModalProps> = ({
             {/* Section 1: WebDAV Configuration */}
             <section className="space-y-4">
                 <div className="flex items-center justify-between">
-                    <h4 className="font-medium text-slate-800 dark:text-slate-200">WebDAV 设置 (坚果云/<a href="https://infini-cloud.net/en/modules/mypage/usage/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-600 underline">InfiniCloud</a>等)</h4>
+                    <h4 className="font-medium text-slate-800 dark:text-slate-200">
+                      WebDAV 设置 (OpenDrive <a href="https://www.opendrive.com/login" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-600 underline">登录</a>、<a href="https://www.opendrive.com/signup" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-600 underline">注册</a> / <a href="https://infini-cloud.net/en/modules/mypage/usage/" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-600 underline">InfiniCloud</a>等)
+                    </h4>
                     <label className="flex items-center gap-2 cursor-pointer">
                         <input 
                             type="checkbox" 
@@ -160,7 +162,7 @@ const BackupModal: React.FC<BackupModalProps> = ({
                             type="text" 
                             value={config.url}
                             onChange={(e) => setConfig({...config, url: e.target.value})}
-                            placeholder="https://dav.jianguoyun.com/dav/"
+                            placeholder="https://webdav.opendrive.com/"
                             className="w-full p-2 text-sm rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white outline-none focus:ring-2 focus:ring-blue-500"
                         />
                     </div>

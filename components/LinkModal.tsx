@@ -139,7 +139,7 @@ const LinkModal: React.FC<LinkModalProps> = ({ isOpen, onClose, onSave, onDelete
     });
     
     // 如果有自定义图标URL，缓存到KV空间
-    if (icon && !icon.includes('faviconextractor.com')) {
+    if (icon && !icon.includes('gstatic.cn')) {
       cacheCustomIcon(finalUrl, icon);
     }
     
@@ -224,7 +224,7 @@ const LinkModal: React.FC<LinkModalProps> = ({ isOpen, onClose, onSave, onDelete
       }
       
       // 如果缓存中没有，则生成新图标
-      const iconUrl = `https://www.faviconextractor.com/favicon/${domain}?larger=true`;
+      const iconUrl = `https://t3.gstatic.cn/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&size=128&url=https://${domain}`;
       setIcon(iconUrl);
       
       // 将图标保存到KV缓存
@@ -418,8 +418,13 @@ const LinkModal: React.FC<LinkModalProps> = ({ isOpen, onClose, onSave, onDelete
             onChange={(e) => setCategoryId(e.target.value)}
             className="w-full p-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
             >
-            {categories.map(cat => (
-                <option key={cat.id} value={cat.id}>{cat.name}</option>
+            {categories.filter(c => !c.parentId).map(parent => (
+              <optgroup key={parent.id} label={parent.name}>
+                <option value={parent.id}>{parent.name}</option>
+                {categories.filter(c => c.parentId === parent.id).map(sub => (
+                  <option key={sub.id} value={sub.id}>{parent.name} / {sub.name}</option>
+                ))}
+              </optgroup>
             ))}
             </select>
           </div>

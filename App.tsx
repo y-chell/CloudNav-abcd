@@ -67,7 +67,7 @@ function App() {
 
   // WebDAV Config State
   const [webDavConfig, setWebDavConfig] = useState<WebDavConfig>({
-      url: '',
+      url: 'https://webdav.opendrive.com/',
       username: '',
       password: '',
       enabled: false
@@ -133,6 +133,10 @@ function App() {
   // Batch Edit State
   const [isBatchEditMode, setIsBatchEditMode] = useState(false); // 是否处于批量编辑模式
   const [selectedLinks, setSelectedLinks] = useState<Set<string>>(new Set()); // 选中的链接ID集合
+  
+  // Sub-category State
+  const [hoveredCategory, setHoveredCategory] = useState<string | null>(null); // 当前悬浮的一级分类ID
+  const [hoveredCategoryTop, setHoveredCategoryTop] = useState<number>(0); // 当前悬浮的一级分类的垂直位置
   
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<{
@@ -440,10 +444,10 @@ function App() {
           });
           
           if (linkToUpdate) {
-            // 只有当链接没有图标，或者当前图标是faviconextractor.com生成的，或者缓存中的图标是自定义图标时才更新
+            // 只有当链接没有图标，或者当前图标是 gstatic.cn 生成的，或者缓存中的图标是自定义图标时才更新
             if (!linkToUpdate.icon || 
-                linkToUpdate.icon.includes('faviconextractor.com') || 
-                !result.icon.includes('faviconextractor.com')) {
+                linkToUpdate.icon.includes('gstatic.cn') || 
+                !result.icon.includes('gstatic.cn')) {
               linkToUpdate.icon = result.icon;
             }
           }
@@ -1067,9 +1071,12 @@ function App() {
     const { active, over } = event;
 
     if (over && active.id !== over.id) {
-      // 获取当前分类下的所有链接
+      // 获取当前分类下的所有链接（包括子分类）
+      const subCategoryIds = categories.filter(c => c.parentId === selectedCategory).map(c => c.id);
       const categoryLinks = links.filter(link => 
-        selectedCategory === 'all' || link.categoryId === selectedCategory
+        selectedCategory === 'all' || 
+        link.categoryId === selectedCategory || 
+        subCategoryIds.includes(link.categoryId)
       );
       
       // 找到被拖拽元素和目标元素的索引
@@ -1309,12 +1316,29 @@ function App() {
   // --- Category Management & Security ---
 
   const handleCategoryClick = (cat: Category) => {
-      // If category has password and is NOT unlocked
-      if (cat.password && !unlockedCategoryIds.has(cat.id)) {
-          setCatAuthModalData(cat);
+      // 检查当前分类或其父分类是否设置了密码且未解锁
+      const getLockedAncestor = (category: Category): Category | null => {
+          // 如果当前分类有密码且未解锁，返回当前分类
+          if (category.password && !unlockedCategoryIds.has(category.id)) {
+              return category;
+          }
+          // 如果有父分类，递归检查父分类
+          if (category.parentId) {
+              const parent = categories.find(c => c.id === category.parentId);
+              if (parent) {
+                  return getLockedAncestor(parent);
+              }
+          }
+          return null;
+      };
+
+      const lockedAncestor = getLockedAncestor(cat);
+      if (lockedAncestor) {
+          setCatAuthModalData(lockedAncestor);
           setSidebarOpen(false);
           return;
       }
+      
       setSelectedCategory(cat.id);
       setSidebarOpen(false);
   };
@@ -1329,28 +1353,24 @@ function App() {
       updateData(links, newCats);
   };
 
-  const handleDeleteCategory = (catId: string) => {
+  const handleDeleteCategory = (catId: string, mode: 'migrate' | 'delete_all' = 'migrate', targetId: string = 'common') => {
       if (!authToken) { setIsAuthOpen(true); return; }
       
-      // 防止删除"常用推荐"分类
-      if (catId === 'common') {
-          alert('"常用推荐"分类不能被删除');
-          return;
+      // 找出所有要删除的分类ID（包括子分类）
+      const idsToDelete = [catId];
+      const children = categories.filter(c => c.parentId === catId);
+      children.forEach(child => idsToDelete.push(child.id));
+
+      let newCats = categories.filter(c => !idsToDelete.includes(c.id));
+      
+      let newLinks;
+      if (mode === 'migrate') {
+        // 迁移书签
+        newLinks = links.map(l => idsToDelete.includes(l.categoryId) ? { ...l, categoryId: targetId } : l);
+      } else {
+        // 连同书签一起删除
+        newLinks = links.filter(l => !idsToDelete.includes(l.categoryId));
       }
-      
-      let newCats = categories.filter(c => c.id !== catId);
-      
-      // 检查是否存在"常用推荐"分类，如果不存在则创建它
-      if (!newCats.some(c => c.id === 'common')) {
-          newCats = [
-              { id: 'common', name: '常用推荐', icon: 'Star' },
-              ...newCats
-          ];
-      }
-      
-      // Move links to common or first available
-      const targetId = 'common'; 
-      const newLinks = links.map(l => l.categoryId === catId ? { ...l, categoryId: targetId } : l);
       
       updateData(newLinks, newCats);
   };
@@ -1673,11 +1693,20 @@ function App() {
 
   // --- Filtering & Memo ---
 
-  // Helper to check if a category is "Locked" (Has password AND not unlocked)
-  const isCategoryLocked = (catId: string) => {
+  // Helper to check if a category is "Locked" (Has password AND not unlocked, or its parent is locked)
+  const isCategoryLocked = (catId: string): boolean => {
       const cat = categories.find(c => c.id === catId);
-      if (!cat || !cat.password) return false;
-      return !unlockedCategoryIds.has(catId);
+      if (!cat) return false;
+      
+      // 检查当前分类是否锁定
+      if (cat.password && !unlockedCategoryIds.has(catId)) return true;
+      
+      // 如果有父分类，递归检查父分类是否锁定
+      if (cat.parentId) {
+          return isCategoryLocked(cat.parentId);
+      }
+      
+      return false;
   };
 
   const pinnedLinks = useMemo(() => {
@@ -1715,7 +1744,9 @@ function App() {
 
     // Category Filter
     if (selectedCategory !== 'all') {
-      result = result.filter(l => l.categoryId === selectedCategory);
+      // 获取当前分类及其所有子分类的ID
+      const subCategoryIds = categories.filter(c => c.parentId === selectedCategory).map(c => c.id);
+      result = result.filter(l => l.categoryId === selectedCategory || subCategoryIds.includes(l.categoryId));
     }
     
     // 按照order字段排序，如果没有order字段则按创建时间排序
@@ -1855,6 +1886,12 @@ function App() {
   const renderLinkCard = (link: LinkItem) => {
     const isSelected = selectedLinks.has(link.id);
     
+    // 检查是否在有二级分类的一级分类页面下，且该站点未归属到二级分类
+    const isUnassignedHighlight = selectedCategory !== 'all' && 
+                                 !categories.find(c => c.id === selectedCategory)?.parentId && 
+                                 link.categoryId === selectedCategory && 
+                                 categories.some(c => c.parentId === selectedCategory);
+
     // 根据视图模式决定卡片样式
     const isDetailedView = siteSettings.cardStyle === 'detailed';
     
@@ -1864,7 +1901,9 @@ function App() {
         className={`group relative transition-all duration-200 hover:shadow-lg hover:shadow-blue-100/50 dark:hover:shadow-blue-900/20 ${
           isSelected 
             ? 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800' 
-            : 'bg-white dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-slate-200 dark:border-slate-700'
+            : isUnassignedHighlight
+              ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/50 hover:bg-amber-100 dark:hover:bg-amber-900/30'
+              : 'bg-white dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-slate-200 dark:border-slate-700'
         } ${isBatchEditMode ? 'cursor-pointer' : ''} ${
           isDetailedView 
             ? 'flex flex-col rounded-2xl border shadow-sm p-4 min-h-[100px] hover:border-blue-400 dark:hover:border-blue-500' 
@@ -2060,7 +2099,7 @@ function App() {
       {/* Sidebar */}
       <aside 
         className={`
-          fixed lg:static inset-y-0 left-0 z-30 w-64 transform transition-transform duration-300 ease-in-out
+          fixed lg:static inset-y-0 left-0 z-50 w-64 transform transition-transform duration-300 ease-in-out
           bg-white dark:bg-slate-800 border-r border-slate-200 dark:border-slate-700 flex flex-col
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         `}
@@ -2073,20 +2112,25 @@ function App() {
         </div>
 
         {/* Categories List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-hide">
-            <button
-              onClick={() => { setSelectedCategory('all'); setSidebarOpen(false); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
-                selectedCategory === 'all' 
-                  ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
-                  : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'
-              }`}
-            >
-              <div className="p-1"><Icon name="LayoutGrid" size={18} /></div>
-              <span>置顶网站</span>
-            </button>
+        <div 
+          className="flex-1 overflow-y-auto py-4 space-y-1 scrollbar-hide"
+          onScroll={() => setHoveredCategory(null)}
+        >
+            <div className="px-4">
+              <button
+                onClick={() => { setSelectedCategory('all'); setSidebarOpen(false); }}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
+                  selectedCategory === 'all' 
+                    ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
+                    : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'
+                }`}
+              >
+                <div className="p-1"><Icon name="LayoutGrid" size={18} /></div>
+                <span>置顶网站</span>
+              </button>
+            </div>
             
-            <div className="flex items-center justify-between pt-4 pb-2 px-4">
+            <div className="flex items-center justify-between pt-4 pb-2 px-8">
                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">分类目录</span>
                <button 
                   onClick={() => { if(!authToken) setIsAuthOpen(true); else setIsCatManagerOpen(true); }}
@@ -2097,24 +2141,69 @@ function App() {
                </button>
             </div>
 
-            {categories.map(cat => {
+            {categories.filter(c => !c.parentId).map(cat => {
                 const isLocked = cat.password && !unlockedCategoryIds.has(cat.id);
+                const subCats = categories.filter(c => c.parentId === cat.id);
                 return (
-                  <button
-                    key={cat.id}
-                    onClick={() => handleCategoryClick(cat)}
-                    className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all group ${
-                      selectedCategory === cat.id 
-                        ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
-                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'
-                    }`}
+                  <div 
+                    key={cat.id} 
+                    className="relative px-4"
+                    onMouseEnter={(e) => {
+                      setHoveredCategory(cat.id);
+                      setHoveredCategoryTop(e.currentTarget.getBoundingClientRect().top);
+                    }}
+                    onMouseLeave={() => setHoveredCategory(null)}
                   >
-                    <div className={`p-1.5 rounded-lg transition-colors flex items-center justify-center ${selectedCategory === cat.id ? 'bg-blue-100 dark:bg-blue-800' : 'bg-slate-100 dark:bg-slate-800'}`}>
-                      {isLocked ? <Lock size={16} className="text-amber-500" /> : <Icon name={cat.icon} size={16} />}
-                    </div>
-                    <span className="truncate flex-1 text-left">{cat.name}</span>
-                    {selectedCategory === cat.id && <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>}
-                  </button>
+                    <button
+                      onClick={() => handleCategoryClick(cat)}
+                      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all group ${
+                        selectedCategory === cat.id || (subCats.some(sc => sc.id === selectedCategory))
+                          ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
+                          : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      <div className={`p-1.5 rounded-lg transition-colors flex items-center justify-center ${selectedCategory === cat.id ? 'bg-blue-100 dark:bg-blue-800' : 'bg-slate-100 dark:bg-slate-800'}`}>
+                        {isLocked ? <Lock size={16} className="text-amber-500" /> : <Icon name={cat.icon} size={16} />}
+                      </div>
+                      <span className="truncate flex-1 text-left">{cat.name}</span>
+                      {(selectedCategory === cat.id || subCats.some(sc => sc.id === selectedCategory)) && <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>}
+                      {subCats.length > 0 && (
+                        <div className="text-slate-400 group-hover:text-blue-500 transition-colors">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                        </div>
+                      )}
+                    </button>
+
+                    {/* 二级分类悬浮菜单 */}
+                    {hoveredCategory === cat.id && subCats.length > 0 && (
+                      <div 
+                          className="fixed left-64 w-[166px] bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-2 z-[60] animate-in fade-in slide-in-from-left-2 duration-200 hidden lg:block"
+                          style={{ top: hoveredCategoryTop }}
+                        >
+                        {/* 增加一个透明的遮罩层，防止鼠标移动到间隙时消失 */}
+                        <div className="absolute -left-4 top-0 bottom-0 w-4 bg-transparent" />
+                        
+                        <div className="px-4 py-1 mb-1 border-b border-slate-100 dark:border-slate-700">
+                          <span className="font-bold text-slate-400 uppercase tracking-widest" style={{ fontSize: '13px' }}>{cat.name} / 二级分类</span>
+                        </div>
+                        {subCats.map(subCat => {
+                          const isSubLocked = isCategoryLocked(subCat.id);
+                          return (
+                            <button
+                              key={subCat.id}
+                              onClick={() => handleCategoryClick(subCat)}
+                              className={`w-full flex items-center gap-3 px-4 py-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors text-left ${
+                                selectedCategory === subCat.id ? 'text-blue-600 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400'
+                              }`}
+                            >
+                              {isSubLocked ? <Lock size={14} className="text-amber-500" /> : <Icon name={subCat.icon} size={14} />}
+                              <span className="text-sm truncate">{subCat.name}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
             })}
         </div>
@@ -2167,7 +2256,7 @@ function App() {
                  title="Fork this project on GitHub"
                >
                  <GitFork size={14} />
-                 <span>Fork 项目 v1.7.1</span>
+                 <span>Fork 项目 v1.8.2</span>
                </a>
             </div>
         </div>
@@ -2260,7 +2349,7 @@ function App() {
                             className="px-2 py-2 text-sm rounded-md hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 flex items-center gap-1 justify-center"
                           >
                             <img 
-                              src={`https://www.faviconextractor.com/favicon/${new URL(source.url).hostname}?larger=true`}
+                              src={`https://t3.gstatic.cn/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&size=128&url=https://${new URL(source.url).hostname}`}
                               alt={source.name}
                               className="w-4 h-4"
                               onError={(e) => {
@@ -2294,7 +2383,7 @@ function App() {
                     </svg>
                   ) : (hoveredSearchSource || selectedSearchSource) ? (
                     <img 
-                      src={`https://www.faviconextractor.com/favicon/${new URL((hoveredSearchSource || selectedSearchSource).url).hostname}?larger=true`}
+                      src={`https://t3.gstatic.cn/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&size=128&url=https://${new URL((hoveredSearchSource || selectedSearchSource).url).hostname}`}
                       alt={(hoveredSearchSource || selectedSearchSource).name}
                       className="w-4 h-4"
                       onError={(e) => {
@@ -2503,21 +2592,71 @@ function App() {
                     </div>
                  )}
 
-                 <div className="flex items-center justify-between mb-4">
-                     <h2 className="text-sm font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                         {selectedCategory === 'all' 
-                            ? (searchQuery ? '搜索结果' : '所有链接') 
-                            : (
-                                <>
-                                    {categories.find(c => c.id === selectedCategory)?.name}
-                                    {isCategoryLocked(selectedCategory) && <Lock size={14} className="text-amber-500" />}
-                                    <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 rounded-full">
-                                        {displayedLinks.length}
-                                    </span>
-                                </>
-                            )
-                         }
-                     </h2>
+                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                     <div className="flex items-center flex-wrap gap-y-2">
+                         <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2 mr-4">
+                             {selectedCategory === 'all' 
+                                ? (searchQuery ? '搜索结果' : '所有链接') 
+                                : (() => {
+                                    const currentCat = categories.find(c => c.id === selectedCategory);
+                                    const primaryCat = currentCat?.parentId 
+                                      ? categories.find(c => c.id === currentCat.parentId) 
+                                      : currentCat;
+                                    
+                                    if (!primaryCat) return '未知分类';
+
+                                    const subCats = categories.filter(c => c.parentId === primaryCat.id);
+                                    
+                                    return (
+                                      <div className="flex items-center gap-3">
+                                        <div className="flex items-center gap-2">
+                                          <Icon name={primaryCat.icon} size={20} className="text-blue-500" />
+                                          <button 
+                                            onClick={() => handleCategoryClick(primaryCat)}
+                                            className={`hover:text-blue-600 transition-colors ${selectedCategory === primaryCat.id ? 'text-slate-900 dark:text-white' : 'text-slate-500 dark:text-slate-400 font-medium'}`}
+                                          >
+                                            {primaryCat.name}
+                                          </button>
+                                          {isCategoryLocked(primaryCat.id) && <Lock size={14} className="text-amber-500" />}
+                                        </div>
+
+                                        {subCats.length > 0 && (
+                                          <>
+                                            <div className="h-4 w-[1px] bg-slate-300 dark:bg-slate-600 mx-1" />
+                                            <div className="flex items-center gap-4 overflow-x-auto no-scrollbar py-1">
+                                              {subCats.map(sub => (
+                                                <button
+                                                  key={sub.id}
+                                                  onClick={() => handleCategoryClick(sub)}
+                                                  className={`text-sm whitespace-nowrap transition-all relative py-1 ${
+                                                    selectedCategory === sub.id 
+                                                      ? 'text-blue-600 dark:text-blue-400 font-bold' 
+                                                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 font-medium'
+                                                  }`}
+                                                >
+                                                  <div className="flex items-center gap-1">
+                                                    {sub.name}
+                                                    {isCategoryLocked(sub.id) && <Lock size={12} className="text-amber-500" />}
+                                                  </div>
+                                                  {selectedCategory === sub.id && (
+                                                    <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500 rounded-full animate-in fade-in zoom-in duration-300" />
+                                                  )}
+                                                </button>
+                                              ))}
+                                            </div>
+                                          </>
+                                        )}
+                                      </div>
+                                    );
+                                  })()
+                             }
+                         </h2>
+                         {selectedCategory !== 'all' && (
+                           <span className="px-2 py-0.5 text-xs font-semibold bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 rounded-full">
+                             {displayedLinks.length}
+                           </span>
+                         )}
+                     </div>
                      {selectedCategory !== 'all' && !isCategoryLocked(selectedCategory) && (
                          isSortingMode === selectedCategory ? (
                              <div className="flex gap-2">
@@ -2576,16 +2715,40 @@ function App() {
                                                   <Upload size={14} />
                                                   <span>批量移动</span>
                                               </button>
-                                              <div className="absolute top-full right-0 mt-1 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-700 z-20 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200">
-                                                  {categories.filter(cat => cat.id !== selectedCategory).map(cat => (
+                                              <div className="absolute top-full right-0 mt-1 w-56 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-700 z-20 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 overflow-hidden max-h-[500px] overflow-y-auto no-scrollbar">
+                                                  {(() => {
+                                                    const flattened = [];
+                                                    const parents = categories.filter(c => !c.parentId);
+                                                    
+                                                    for (const parent of parents) {
+                                                      if (parent.id !== selectedCategory) {
+                                                        flattened.push({
+                                                          id: parent.id,
+                                                          displayName: parent.name
+                                                        });
+                                                      }
+                                                      
+                                                      const children = categories.filter(c => c.parentId === parent.id);
+                                                      for (const child of children) {
+                                                        if (child.id !== selectedCategory) {
+                                                          flattened.push({
+                                                            id: child.id,
+                                                            displayName: `${parent.name} / ${child.name}`
+                                                          });
+                                                        }
+                                                      }
+                                                    }
+                                                    
+                                                    return flattened.map(cat => (
                                                       <button
                                                           key={cat.id}
                                                           onClick={() => handleBatchMove(cat.id)}
-                                                          className="w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 first:rounded-t-lg last:rounded-b-lg"
+                                                          className="w-full text-left px-4 py-2.5 text-xs text-slate-700 dark:text-slate-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 border-b border-slate-100 dark:border-slate-700 last:border-0 transition-colors"
                                                       >
-                                                          {cat.name}
+                                                          {cat.displayName}
                                                       </button>
-                                                  ))}
+                                                    ));
+                                                  })()}
                                               </div>
                                           </div>
                                      </>

@@ -390,13 +390,53 @@ function buildMenus() {
         });
 
         if (categoryCache.length > 0) {
-            categoryCache.forEach(cat => {
-                chrome.contextMenus.create({
-                    id: \`save_to_\${cat.id}\`,
-                    parentId: "cloudnav_root",
-                    title: cat.name,
-                    contexts: ["page", "link", "action"]
-                });
+            const parents = categoryCache.filter(c => !c.parentId);
+            parents.forEach(cat => {
+                const subCats = categoryCache.filter(c => c.parentId === cat.id);
+                
+                if (subCats.length > 0) {
+                    // 有二级分类，创建父级菜单
+                    chrome.contextMenus.create({
+                        id: \`parent_\${cat.id}\`,
+                        parentId: "cloudnav_root",
+                        title: cat.name,
+                        contexts: ["page", "link", "action"]
+                    });
+
+                    // 在父级菜单下添加“保存到 [当前分类]”选项
+                    chrome.contextMenus.create({
+                        id: \`save_to_\${cat.id}\`,
+                        parentId: \`parent_\${cat.id}\`,
+                        title: \`保存到 \${cat.name}\`,
+                        contexts: ["page", "link", "action"]
+                    });
+
+                    // 添加分隔符
+                    chrome.contextMenus.create({
+                        id: \`sep_\${cat.id}\`,
+                        parentId: \`parent_\${cat.id}\`,
+                        type: "separator",
+                        contexts: ["page", "link", "action"]
+                    });
+
+                    // 添加二级分类
+                    subCats.forEach(sub => {
+                        chrome.contextMenus.create({
+                            id: \`save_to_\${sub.id}\`,
+                            parentId: \`parent_\${cat.id}\`,
+                            title: sub.name,
+                            contexts: ["page", "link", "action"]
+                        });
+                    });
+                } else {
+                    // 没有二级分类，直接显示
+                    chrome.contextMenus.create({
+                        id: \`save_to_\${cat.id}\`,
+                        parentId: "cloudnav_root",
+                        title: cat.name,
+                        contexts: ["page", "link", "action"]
+                    });
+                }
             });
         } else {
             chrome.contextMenus.create({
@@ -542,9 +582,18 @@ function notify(title, message) {
         .cat-arrow { width: 14px; height: 14px; color: var(--muted); transition: transform 0.2s; }
         .cat-header.active .cat-arrow { transform: rotate(90deg); color: var(--accent); }
         
+        .cat-header .lock-icon { width: 14px; height: 14px; color: #f59e0b; margin-left: auto; }
+
         .cat-links { display: none; padding-left: 8px; margin-bottom: 8px; }
         .cat-header.active + .cat-links { display: block; }
         
+        .sub-cat-group { margin-top: 8px; margin-bottom: 4px; }
+        .sub-cat-title { 
+            padding: 4px 8px; font-size: 11px; font-weight: 700; color: var(--muted); 
+            text-transform: uppercase; letter-spacing: 0.05em; display: flex; items-center; gap: 4px;
+        }
+        .sub-cat-title::before { content: ""; width: 4px; height: 4px; background: var(--accent); border-radius: 50%; opacity: 0.5; }
+
         .link-item { display: flex; items-center; gap: 8px; padding: 6px 8px; border-radius: 6px; text-decoration: none; color: var(--text); transition: background 0.1s; border-left: 2px solid transparent; }
         .link-item:hover { background: var(--hover); border-left-color: var(--accent); }
         .link-icon { width: 16px; height: 16px; flex-shrink: 0; display: flex; items-center; justify-content: center; overflow: hidden; }
@@ -554,6 +603,31 @@ function notify(title, message) {
         
         .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 12px; }
         .loading { display: flex; justify-content: center; padding: 40px; color: var(--accent); font-size: 12px; }
+
+        /* 密码验证模态框样式 */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.5); 
+            display: none; items-center; justify-content: center; z-index: 100;
+            backdrop-blur: 2px;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal-content {
+            background: var(--bg); padding: 20px; border-radius: 12px;
+            width: 240px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+        }
+        .modal-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; text-align: center; }
+        .modal-input {
+            width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
+            background: var(--hover); color: var(--text); margin-bottom: 12px; box-sizing: border-box;
+            outline: none; text-align: center;
+        }
+        .modal-input:focus { border-color: var(--accent); }
+        .modal-btns { display: flex; gap: 8px; }
+        .modal-btn {
+            flex: 1; padding: 8px; border-radius: 6px; border: none; font-size: 13px; cursor: pointer;
+        }
+        .modal-btn-confirm { background: var(--accent); color: white; }
+        .modal-btn-cancel { background: var(--hover); color: var(--text); }
     </style>
 </head>
 <body>
@@ -566,6 +640,18 @@ function notify(title, message) {
     <div id="content" class="content">
         <div class="loading">初始化...</div>
     </div>
+
+    <div id="auth-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div id="auth-title" class="modal-title">请输入密码</div>
+            <input type="password" id="auth-input" class="modal-input" placeholder="密码">
+            <div class="modal-btns">
+                <button id="auth-cancel" class="modal-btn modal-btn-cancel">取消</button>
+                <button id="auth-confirm" class="modal-btn modal-btn-confirm">确定</button>
+            </div>
+        </div>
+    </div>
+
     <script src="sidebar.js"></script>
 </body>
 </html>`;
@@ -599,12 +685,78 @@ document.addEventListener('DOMContentLoaded', async () => {
     const searchInput = document.getElementById('search');
     const refreshBtn = document.getElementById('refresh');
     
+    // 密码模态框元素
+    const authModal = document.getElementById('auth-modal');
+    const authTitle = document.getElementById('auth-title');
+    const authInput = document.getElementById('auth-input');
+    const authCancel = document.getElementById('auth-cancel');
+    const authConfirm = document.getElementById('auth-confirm');
+    
     let allLinks = [];
     let allCategories = [];
     let expandedCats = new Set(); 
+    let unlockedCategoryIds = new Set();
+    let currentAuthCat = null;
 
     const getArrowIcon = () => {
         return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="cat-arrow"><polyline points="9 18 15 12 9 6"></polyline></svg>';
+    };
+
+    const getLockIcon = () => {
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lock-icon"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>';
+    };
+
+    const isCategoryLocked = (catId) => {
+        const cat = allCategories.find(c => c.id === catId);
+        if (!cat) return false;
+        if (cat.password && !unlockedCategoryIds.has(catId)) return true;
+        if (cat.parentId) return isCategoryLocked(cat.parentId);
+        return false;
+    };
+
+    const getLockedAncestor = (cat) => {
+        if (cat.password && !unlockedCategoryIds.has(cat.id)) return cat;
+        if (cat.parentId) {
+            const parent = allCategories.find(c => c.id === cat.parentId);
+            if (parent) return getLockedAncestor(parent);
+        }
+        return null;
+    };
+
+    const showAuthModal = (cat) => {
+        currentAuthCat = cat;
+        authTitle.textContent = \`解锁 "\${cat.name}"\`;
+        authInput.value = '';
+        authModal.classList.add('show');
+        authInput.focus();
+    };
+
+    const hideAuthModal = () => {
+        authModal.classList.remove('show');
+        currentAuthCat = null;
+    };
+
+    authCancel.onclick = hideAuthModal;
+    authConfirm.onclick = () => {
+        if (currentAuthCat && authInput.value === currentAuthCat.password) {
+            unlockedCategoryIds.add(currentAuthCat.id);
+            const idToExpand = currentAuthCat.id;
+            hideAuthModal();
+            render(searchInput.value);
+            // 如果解锁的是父分类，尝试展开它
+            if (!currentAuthCat.parentId) {
+                toggleCat(idToExpand, true);
+            }
+        } else {
+            alert('密码错误');
+            authInput.value = '';
+            authInput.focus();
+        }
+    };
+
+    authInput.onkeydown = (e) => {
+        if (e.key === 'Enter') authConfirm.onclick();
+        if (e.key === 'Escape') hideAuthModal();
     };
 
     const getFaviconUrl = (pageUrl) => {
@@ -618,14 +770,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     };
 
-    const toggleCat = (id) => {
+    const toggleCat = (id, forceOpen = false) => {
         const header = document.querySelector(\`.cat-header[data-id="\${id}"]\`);
         if (header) {
-            header.classList.toggle('active');
-            if (header.classList.contains('active')) {
+            if (forceOpen) {
+                header.classList.add('active');
                 expandedCats.add(id);
             } else {
-                expandedCats.delete(id);
+                header.classList.toggle('active');
+                if (header.classList.contains('active')) {
+                    expandedCats.add(id);
+                } else {
+                    expandedCats.delete(id);
+                }
             }
         }
     };
@@ -633,7 +790,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     container.addEventListener('click', (e) => {
         const header = e.target.closest('.cat-header');
         if (header) {
-            toggleCat(header.dataset.id);
+            const catId = header.dataset.id;
+            const cat = allCategories.find(c => c.id === catId);
+            if (cat) {
+                const lockedAncestor = getLockedAncestor(cat);
+                if (lockedAncestor) {
+                    showAuthModal(lockedAncestor);
+                    return;
+                }
+            }
+            toggleCat(catId);
+        }
+
+        const linkItem = e.target.closest('.link-item');
+        if (linkItem) {
+            // 链接点击时也可以增加一层校验，虽然渲染时已经过滤了，但为了安全
+            const url = linkItem.getAttribute('href');
+            const link = allLinks.find(l => l.url === url);
+            if (link && isCategoryLocked(link.categoryId)) {
+                e.preventDefault();
+                const cat = allCategories.find(c => c.id === link.categoryId);
+                const lockedAncestor = getLockedAncestor(cat);
+                if (lockedAncestor) showAuthModal(lockedAncestor);
+            }
         }
     });
 
@@ -644,17 +823,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         const isSearching = q.length > 0;
 
-        allCategories.forEach(cat => {
-            const catLinks = allLinks.filter(l => {
-                const inCat = l.categoryId === cat.id;
-                if (!inCat) return false;
-                if (!q) return true;
-                return l.title.toLowerCase().includes(q) || 
-                       l.url.toLowerCase().includes(q) || 
-                       (l.description && l.description.toLowerCase().includes(q));
-            });
+        const parents = allCategories.filter(c => !c.parentId);
 
-            if (catLinks.length === 0) return;
+        parents.forEach(cat => {
+            const subCats = allCategories.filter(sc => sc.parentId === cat.id);
+            const directLinks = allLinks.filter(l => l.categoryId === cat.id);
+            
+            const isLocked = isCategoryLocked(cat.id);
+            
+            const matchesQuery = (l) => !q || 
+                                       l.title.toLowerCase().includes(q) || 
+                                       l.url.toLowerCase().includes(q) || 
+                                       (l.description && l.description.toLowerCase().includes(q));
+
+            const filteredDirectLinks = isLocked ? [] : directLinks.filter(matchesQuery);
+            const subCatResults = isLocked ? [] : subCats.map(sc => ({
+                ...sc,
+                links: allLinks.filter(l => l.categoryId === sc.id).filter(matchesQuery)
+            })).filter(res => res.links.length > 0);
+
+            if (!isLocked && filteredDirectLinks.length === 0 && subCatResults.length === 0) return;
             hasContent = true;
 
             const isOpen = expandedCats.has(cat.id) || isSearching;
@@ -665,11 +853,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 <div class="cat-header \${activeClass}" data-id="\${cat.id}">
                     \${getArrowIcon()}
                     <span>\${cat.name}</span>
+                    \${isLocked ? getLockIcon() : ''}
                 </div>
                 <div class="cat-links">
             \`;
             
-            catLinks.forEach(link => {
+            // 渲染直接属于父分类的链接
+            filteredDirectLinks.forEach(link => {
                 const iconSrc = getFaviconUrl(link.url);
                 html += \`
                     <a href="\${link.url}" target="_blank" class="link-item">
@@ -678,6 +868,30 @@ document.addEventListener('DOMContentLoaded', async () => {
                             <div class="link-title">\${link.title}</div>
                         </div>
                     </a>
+                \`;
+            });
+
+            // 渲染二级分类及其链接
+            subCatResults.forEach(sub => {
+                const isSubLocked = isCategoryLocked(sub.id);
+                html += \`
+                    <div class="sub-cat-group">
+                        <div class="sub-cat-title" style="display: flex; align-items: center; justify-content: space-between;">
+                            <span>\${sub.name}</span>
+                            \${isSubLocked ? '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:#f59e0b;"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>' : ''}
+                        </div>
+                        \${isSubLocked ? '' : sub.links.map(link => {
+                            const iconSrc = getFaviconUrl(link.url);
+                            return \`
+                                <a href="\${link.url}" target="_blank" class="link-item" style="margin-left: 8px;">
+                                    <div class="link-icon"><img src="\${iconSrc}" /></div>
+                                    <div class="link-info">
+                                        <div class="link-title">\${link.title}</div>
+                                    </div>
+                                </a>
+                            \`;
+                        }).join('')}
+                    </div>
                 \`;
             });
 

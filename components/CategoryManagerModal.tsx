@@ -4,13 +4,14 @@ import { Category } from '../types';
 import Icon from './Icon';
 import IconSelector from './IconSelector';
 import CategoryActionAuthModal from './CategoryActionAuthModal';
+import CategoryDeleteModal from './CategoryDeleteModal';
 
 interface CategoryManagerModalProps {
   isOpen: boolean;
   onClose: () => void;
   categories: Category[];
   onUpdateCategories: (newCategories: Category[]) => void;
-  onDeleteCategory: (id: string) => void;
+  onDeleteCategory: (id: string, mode: 'migrate' | 'delete_all', targetId?: string) => void;
   onVerifyPassword?: (password: string) => Promise<boolean>;
 }
 
@@ -26,10 +27,12 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
   const [editName, setEditName] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [editIcon, setEditIcon] = useState('');
+  const [editParentId, setEditParentId] = useState<string | undefined>(undefined);
   
   const [newCatName, setNewCatName] = useState('');
   const [newCatPassword, setNewCatPassword] = useState('');
   const [newCatIcon, setNewCatIcon] = useState('Folder');
+  const [newCatParentId, setNewCatParentId] = useState<string | undefined>(undefined);
   
   const [isIconSelectorOpen, setIsIconSelectorOpen] = useState(false);
   const [iconSelectorTarget, setIconSelectorTarget] = useState<'edit' | 'new' | null>(null);
@@ -42,16 +45,86 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
     categoryName: string;
   } | null>(null);
 
+  // 删除确认弹窗状态
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deletingCategory, setDeletingCategory] = useState<Category | null>(null);
+
   if (!isOpen) return null;
 
   const handleMove = (index: number, direction: 'up' | 'down') => {
+    const cat = categories[index];
     const newCats = [...categories];
-    if (direction === 'up' && index > 0) {
-      [newCats[index], newCats[index - 1]] = [newCats[index - 1], newCats[index]];
-    } else if (direction === 'down' && index < newCats.length - 1) {
-      [newCats[index], newCats[index + 1]] = [newCats[index + 1], newCats[index]];
+
+    if (cat.parentId) {
+      // 二级分类：只能在其父分类下的二级分类中移动
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (targetIndex >= 0 && targetIndex < newCats.length && newCats[targetIndex].parentId === cat.parentId) {
+        [newCats[index], newCats[targetIndex]] = [newCats[targetIndex], newCats[index]];
+      }
+    } else {
+      // 一级分类：带着其下的二级分类一起整体移动
+      const getBlock = (list: Category[], idx: number) => {
+        const p = list[idx];
+        const block = [p];
+        let i = idx + 1;
+        while (i < list.length && list[i].parentId === p.id) {
+          block.push(list[i]);
+          i++;
+        }
+        return block;
+      };
+
+      const currentBlock = getBlock(categories, index);
+      if (direction === 'up') {
+        let prevParentIdx = -1;
+        for (let i = index - 1; i >= 0; i--) {
+          if (!categories[i].parentId) {
+            prevParentIdx = i;
+            break;
+          }
+        }
+        if (prevParentIdx !== -1) {
+          const prevBlock = getBlock(categories, prevParentIdx);
+          newCats.splice(prevParentIdx, prevBlock.length + currentBlock.length, ...currentBlock, ...prevBlock);
+        }
+      } else {
+        let nextParentIdx = -1;
+        for (let i = index + currentBlock.length; i < categories.length; i++) {
+          if (!categories[i].parentId) {
+            nextParentIdx = i;
+            break;
+          }
+        }
+        if (nextParentIdx !== -1) {
+          const nextBlock = getBlock(categories, nextParentIdx);
+          newCats.splice(index, currentBlock.length + nextBlock.length, ...nextBlock, ...currentBlock);
+        }
+      }
     }
     onUpdateCategories(newCats);
+  };
+
+  // 辅助函数：检查是否可以移动
+  const canMoveUp = (index: number) => {
+    const cat = categories[index];
+    if (index === 0) return false;
+    if (cat.parentId) {
+      return categories[index - 1].parentId === cat.parentId;
+    }
+    // 一级分类只要上方还有一级分类就可以上移
+    return categories.slice(0, index).some(c => !c.parentId);
+  };
+
+  const canMoveDown = (index: number) => {
+    const cat = categories[index];
+    if (index === categories.length - 1) return false;
+    if (cat.parentId) {
+      return categories[index + 1].parentId === cat.parentId;
+    }
+    // 一级分类只要下方还有一级分类就可以下移
+    const currentBlockSize = categories.slice(index + 1).findIndex(c => !c.parentId);
+    if (currentBlockSize === -1) return false; // 下方没有别的一级分类了
+    return true;
   };
 
   // 处理密码验证
@@ -89,10 +162,9 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
   // 处理删除分类前的验证
   const handleDeleteClick = (cat: Category) => {
     if (!onVerifyPassword) {
-      // 如果没有提供验证函数，直接删除
-      if (confirm(`确定删除"${cat.name}"分类吗？该分类下的书签将移动到"常用推荐"。`)) {
-        onDeleteCategory(cat.id);
-      }
+      // 如果没有提供验证函数，直接打开删除确认弹窗
+      setDeletingCategory(cat);
+      setIsDeleteModalOpen(true);
       return;
     }
 
@@ -118,13 +190,22 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
       }
     } else if (pendingAction.type === 'delete') {
       const cat = categories.find(c => c.id === pendingAction.categoryId);
-      if (cat && confirm(`确定删除"${cat.name}"分类吗？该分类下的书签将移动到"常用推荐"。`)) {
-        onDeleteCategory(cat.id);
+      if (cat) {
+        setDeletingCategory(cat);
+        setIsDeleteModalOpen(true);
       }
     }
 
     // 清除待处理的操作
     setPendingAction(null);
+  };
+
+  const handleConfirmDelete = (mode: 'migrate' | 'delete_all', targetCategoryId?: string) => {
+    if (deletingCategory) {
+      onDeleteCategory(deletingCategory.id, mode, targetCategoryId);
+      setIsDeleteModalOpen(false);
+      setDeletingCategory(null);
+    }
   };
 
   // 处理验证弹窗关闭
@@ -138,17 +219,48 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
     setEditName(cat.name);
     setEditPassword(cat.password || '');
     setEditIcon(cat.icon);
+    setEditParentId(cat.parentId);
   };
 
   const saveEdit = () => {
     if (!editingId || !editName.trim()) return;
-    const newCats = categories.map(c => c.id === editingId ? { 
+    
+    const oldCat = categories.find(c => c.id === editingId);
+    const parentChanged = oldCat?.parentId !== editParentId;
+    
+    let updatedCats = categories.map(c => c.id === editingId ? { 
         ...c, 
         name: editName.trim(),
         icon: editIcon,
-        password: editPassword.trim() || undefined
+        password: editPassword.trim() || undefined,
+        parentId: editParentId
     } : c);
-    onUpdateCategories(newCats);
+
+    if (parentChanged) {
+      // 如果归属改变了，重新排列数组以保持父子关系连贯
+      const catToMove = updatedCats.find(c => c.id === editingId)!;
+      // 移除旧位置
+      let filtered = updatedCats.filter(c => c.id !== editingId);
+      
+      if (editParentId) {
+        // 插入到新父分类及其子分类之后
+        const parentIdx = filtered.findIndex(c => c.id === editParentId);
+        if (parentIdx !== -1) {
+          let insertIdx = parentIdx + 1;
+          while (insertIdx < filtered.length && filtered[insertIdx].parentId === editParentId) {
+            insertIdx++;
+          }
+          filtered.splice(insertIdx, 0, catToMove);
+          updatedCats = filtered;
+        }
+      } else {
+        // 变为一级分类，移到末尾
+        filtered.push(catToMove);
+        updatedCats = filtered;
+      }
+    }
+
+    onUpdateCategories(updatedCats);
     setEditingId(null);
   };
 
@@ -158,12 +270,33 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
       id: Date.now().toString(),
       name: newCatName.trim(),
       icon: newCatIcon,
-      password: newCatPassword.trim() || undefined
+      password: newCatPassword.trim() || undefined,
+      parentId: newCatParentId
     };
-    onUpdateCategories([...categories, newCat]);
+
+    let newCats;
+    if (newCatParentId) {
+      // 插入到父分类及其所有子分类之后，而不是数组末尾
+      const parentIdx = categories.findIndex(c => c.id === newCatParentId);
+      if (parentIdx !== -1) {
+        let insertIdx = parentIdx + 1;
+        while (insertIdx < categories.length && categories[insertIdx].parentId === newCatParentId) {
+          insertIdx++;
+        }
+        newCats = [...categories];
+        newCats.splice(insertIdx, 0, newCat);
+      } else {
+        newCats = [...categories, newCat];
+      }
+    } else {
+      newCats = [...categories, newCat];
+    }
+
+    onUpdateCategories(newCats);
     setNewCatName('');
     setNewCatPassword('');
     setNewCatIcon('Folder');
+    setNewCatParentId(undefined);
   };
 
   const openIconSelector = (target: 'edit' | 'new') => {
@@ -202,20 +335,25 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
 
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
           {categories.map((cat, index) => (
-            <div key={cat.id} className="flex flex-col p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg group gap-2">
+            <div 
+              key={cat.id} 
+              className={`flex flex-col p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg group gap-2 transition-all ${
+                cat.parentId ? 'ml-8 border-l-2 border-blue-200 dark:border-blue-900/50' : ''
+              }`}
+            >
               <div className="flex items-center gap-2">
                   {/* Order Controls */}
                   <div className="flex flex-col gap-1 mr-2">
                     <button 
                       onClick={() => handleMove(index, 'up')}
-                      disabled={index === 0}
+                      disabled={!canMoveUp(index)}
                       className="p-0.5 text-slate-400 hover:text-blue-500 disabled:opacity-30"
                     >
                       <ArrowUp size={14} />
                     </button>
                     <button 
                       onClick={() => handleMove(index, 'down')}
-                      disabled={index === categories.length - 1}
+                      disabled={!canMoveDown(index)}
                       className="p-0.5 text-slate-400 hover:text-blue-500 disabled:opacity-30"
                     >
                       <ArrowDown size={14} />
@@ -223,7 +361,7 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {editingId === cat.id && cat.id !== 'common' ? (
+                    {editingId === cat.id ? (
                       <div className="flex flex-col gap-2">
                         <div className="flex items-center gap-2">
                           <Icon name={editIcon} size={16} />
@@ -254,15 +392,33 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                             placeholder="密码（可选）"
                           />
                         </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-400">所属一级分类:</span>
+                          <select
+                            value={editParentId || ''}
+                            onChange={(e) => setEditParentId(e.target.value || undefined)}
+                            className="flex-1 p-1.5 text-xs rounded border border-blue-500 dark:bg-slate-800 dark:text-white outline-none"
+                          >
+                            <option value="">(无 - 作为一级分类)</option>
+                            {categories
+                              .filter(c => !c.parentId && c.id !== editingId)
+                              .map(c => (
+                                <option key={c.id} value={c.id}>{c.name}</option>
+                              ))
+                            }
+                          </select>
+                        </div>
                       </div>
                     ) : (
                       <div className="flex items-center gap-2">
                         <Icon name={cat.icon} size={16} />
                         <span className="font-medium dark:text-slate-200 truncate">
-                          {cat.name}
-                          {cat.id === 'common' && (
-                            <span className="ml-2 text-xs text-slate-400">(默认分类，不可编辑)</span>
+                          {cat.parentId && (
+                            <span className="text-[10px] bg-slate-200 dark:bg-slate-600 px-1 rounded mr-1 text-slate-500 dark:text-slate-400">
+                              {categories.find(c => c.id === cat.parentId)?.name} &gt;
+                            </span>
                           )}
+                          {cat.name}
                         </span>
                         {cat.password && (
                           <Lock size={12} className="text-slate-400" />
@@ -277,26 +433,15 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                        <button onClick={saveEdit} className="text-green-500 hover:bg-green-50 dark:hover:bg-slate-600 p-1.5 rounded bg-white dark:bg-slate-800 shadow-sm border border-slate-200 dark:border-slate-600"><Check size={16}/></button>
                     ) : (
                        <>
-                        {cat.id !== 'common' && (
-                          <button onClick={() => handleStartEdit(cat)} className="p-1.5 text-slate-400 hover:text-blue-500 hover:bg-slate-200 dark:hover:bg-slate-600 rounded">
-                              <Edit2 size={14} />
-                          </button>
-                        )}
-                        {/* 只有非"常用推荐"分类才显示删除按钮 */}
-                        {cat.id !== 'common' && (
-                            <button 
-                            onClick={() => handleDeleteClick(cat)}
-                            className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-slate-200 dark:hover:bg-slate-600 rounded"
-                            >
-                            <Trash2 size={14} />
-                            </button>
-                        )}
-                        {/* "常用推荐"分类显示锁定图标 */}
-                        {cat.id === 'common' && (
-                            <div className="p-1.5 text-slate-300" title="常用推荐分类不能被删除">
-                                <Lock size={14} />
-                            </div>
-                        )}
+                        <button onClick={() => handleStartEdit(cat)} className="p-1.5 text-slate-400 hover:text-blue-500 hover:bg-slate-200 dark:hover:bg-slate-600 rounded">
+                            <Edit2 size={14} />
+                        </button>
+                        <button 
+                        onClick={() => handleDeleteClick(cat)}
+                        className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-slate-200 dark:hover:bg-slate-600 rounded"
+                        >
+                        <Trash2 size={14} />
+                        </button>
                        </>
                     )}
                   </div>
@@ -337,6 +482,18 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                         className="w-full pl-8 p-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                         onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
                     />
+                 </div>
+                 <div className="flex-1">
+                    <select
+                      value={newCatParentId || ''}
+                      onChange={(e) => setNewCatParentId(e.target.value || undefined)}
+                      className="w-full p-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="">(无 - 作为一级分类)</option>
+                      {categories.filter(c => !c.parentId).map(c => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
                  </div>
                  <button 
                     onClick={handleAdd}
@@ -384,6 +541,18 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
               onVerified={handleAuthSuccess}
               actionType={pendingAction.type}
               categoryName={pendingAction.categoryName}
+            />
+          )}
+
+          {/* 删除确认弹窗 */}
+          {isDeleteModalOpen && deletingCategory && (
+            <CategoryDeleteModal
+              isOpen={isDeleteModalOpen}
+              onClose={() => { setIsDeleteModalOpen(false); setDeletingCategory(null); }}
+              categoryName={deletingCategory.name}
+              categories={categories}
+              categoryId={deletingCategory.id}
+              onConfirm={handleConfirmDelete}
             />
           )}
         </div>
